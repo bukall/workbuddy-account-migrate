@@ -24,8 +24,11 @@ python3 scripts/migrate.py
 ```bash
 python3 scripts/migrate.py --diagnose              # 仅诊断，查看数据分布
 python3 scripts/migrate.py --source <USER_ID>      # 指定源账号迁移（高级用户）
+python3 scripts/migrate.py --intl                  # 国际版（数据目录 ~/.workbuddy-ai）
 python3 scripts/migrate.py --rollback <TAG>        # 回滚到指定备份
 ```
+
+**国内版 vs 国际版**：唯一区别是数据目录不同——国内版使用 `~/.workbuddy/`，国际版使用 `~/.workbuddy-ai/`。不加 `--intl` 默认操作国内版。交互式向导会提示选择版本。
 
 ## 问题背景
 

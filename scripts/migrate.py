@@ -47,7 +47,7 @@ def _setup_paths(edition):
     Args:
         edition: "domestic" 使用 ~/.workbuddy（默认），"intl" 使用 ~/.workbuddy-ai
     """
-    global WORKBUDDY_DIR, DB_PATH, MEMORY_DIR, CONNECTORS_DIR, TASKS_DIR
+    global WORKBUDDY_DIR, DB_PATH, MEMORY_DIR, CONNECTORS_DIR, TASKS_DIR, BACKUP_DIR
     if edition == "intl":
         WORKBUDDY_DIR = Path.home() / ".workbuddy-ai"
     else:
@@ -56,6 +56,7 @@ def _setup_paths(edition):
     MEMORY_DIR = WORKBUDDY_DIR / "memory"
     CONNECTORS_DIR = WORKBUDDY_DIR / "connectors"
     TASKS_DIR = WORKBUDDY_DIR / "tasks"
+    BACKUP_DIR = WORKBUDDY_DIR / "migrate_backups"
 
 # storage.json 路径：跨平台支持
 def _get_storage_json_path():
