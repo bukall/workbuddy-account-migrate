@@ -9,6 +9,7 @@ WorkBuddy 账号迁移工具
   python3 migrate.py --diagnose                # 诊断模式：查看所有账号数据分布
   python3 migrate.py --source USER_ID          # 指定源账号迁移（高级用户）
   python3 migrate.py --source USER_ID --yes    # 跳过确认直接迁移
+  python3 migrate.py --intl                    # 国际版（数据目录 ~/.workbuddy-ai）
   python3 migrate.py --rollback TIMESTAMP      # 回滚到指定备份
   python3 migrate.py --restore-tasks           # 恢复历史任务到当前 session
   python3 migrate.py --restore-tasks --session SESSION_ID  # 恢复指定 session 的任务
@@ -32,11 +33,29 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+# WorkBuddy 数据目录：国内版 ~/.workbuddy，国际版 ~/.workbuddy-ai
 WORKBUDDY_DIR = Path.home() / ".workbuddy"
 DB_PATH = WORKBUDDY_DIR / "workbuddy.db"
 MEMORY_DIR = WORKBUDDY_DIR / "memory"
 CONNECTORS_DIR = WORKBUDDY_DIR / "connectors"
 TASKS_DIR = WORKBUDDY_DIR / "tasks"
+
+
+def _setup_paths(edition):
+    """配置 WorkBuddy 数据目录路径
+
+    Args:
+        edition: "domestic" 使用 ~/.workbuddy（默认），"intl" 使用 ~/.workbuddy-ai
+    """
+    global WORKBUDDY_DIR, DB_PATH, MEMORY_DIR, CONNECTORS_DIR, TASKS_DIR
+    if edition == "intl":
+        WORKBUDDY_DIR = Path.home() / ".workbuddy-ai"
+    else:
+        WORKBUDDY_DIR = Path.home() / ".workbuddy"
+    DB_PATH = WORKBUDDY_DIR / "workbuddy.db"
+    MEMORY_DIR = WORKBUDDY_DIR / "memory"
+    CONNECTORS_DIR = WORKBUDDY_DIR / "connectors"
+    TASKS_DIR = WORKBUDDY_DIR / "tasks"
 
 # storage.json 路径：跨平台支持
 def _get_storage_json_path():
@@ -559,8 +578,36 @@ def rollback(backup_tag):
     print("\n  ⚠️  请重启 WorkBuddy 客户端让变更生效！")
 
 
-def interactive_migrate():
+def interactive_migrate(skip_edition_prompt=False):
     """交互式迁移向导：列出所有账号，用户分别选择源和目标"""
+
+    # 版本选择
+    if not skip_edition_prompt:
+        print("=" * 70)
+        print("WorkBuddy 版本选择")
+        print("=" * 70)
+        print()
+        print("  1. 国内版（数据目录 ~/.workbuddy）")
+        print("  2. 国际版（数据目录 ~/.workbuddy-ai）")
+        print()
+        while True:
+            try:
+                choice = input("请选择 WorkBuddy 版本（输入序号，默认 1）: ").strip()
+                if not choice:
+                    break
+                if choice == "2":
+                    _setup_paths("intl")
+                    print("  -> 已选择国际版\n")
+                    break
+                elif choice == "1":
+                    print("  -> 已选择国内版\n")
+                    break
+                else:
+                    print("  请输入 1 或 2")
+            except (EOFError, KeyboardInterrupt):
+                print("\n已取消")
+                return
+
     all_uids = get_all_user_ids()
     session_counts = get_session_counts()
     memory_sizes = get_memory_sizes()
@@ -970,8 +1017,11 @@ def main():
     parser.add_argument("--list-tasks", action="store_true", help="列出所有历史任务概览")
     parser.add_argument("--session", type=str, help="指定要恢复任务的 session ID")
     parser.add_argument("--generate-commands", action="store_true", help="生成 TaskCreate 命令（与 --restore-tasks 配合使用）")
+    parser.add_argument("--intl", action="store_true", help="国际版（数据目录 ~/.workbuddy-ai，默认国内版 ~/.workbuddy）")
 
     args = parser.parse_args()
+
+    _setup_paths("intl" if args.intl else "domestic")
 
     if args.diagnose:
         diagnose()
@@ -988,7 +1038,7 @@ def main():
         migrate(args.source, target_uid=args.target, skip_confirm=args.yes)
     else:
         # 无参数时进入交互式向导
-        interactive_migrate()
+        interactive_migrate(skip_edition_prompt=args.intl)
 
 
 if __name__ == "__main__":

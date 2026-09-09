@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform: macOS | Windows | Linux](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://www.python.org/)
-[![Version 1.4.0](https://img.shields.io/badge/Version-1.4.0-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
+[![Version 1.5.0](https://img.shields.io/badge/Version-1.5.0-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 
 **[English](#english) | [中文](#chinese)**
 
@@ -47,6 +47,7 @@ WorkBuddy 切换账号 / 重新登录 / 换了腾讯云身份后，**之前的�
 |:---|:---|
 | ✅ 交互式向导 | 运行即用，列出所有账号，手动选择目标/源账号，无需知道 user_id |
 | ✅ 跨平台路径适配 | v1.4：storage.json 路径自动适配 macOS / Windows / Linux |
+| ✅ 国内版 / 国际版 | 交互式向导可选版本，或 `--intl` 参数指定国际版（`~/.workbuddy-ai`） |
 | ✅ Session 对话记录迁移 | 修改 SQLite 数据库中的 `user_id` 字段，对话记录全部回归 |
 | ✅ Memory 长期记忆合并 | 追加式去重合并，不会丢失当前账号已有记忆 |
 | ✅ Connector MCP 连接器合并 | JSON 深度合并，目标账号已有配置保留不动 |
@@ -65,6 +66,19 @@ python3 scripts/migrate.py
 ```
 
 运行效果：
+
+```
+======================================================================
+WorkBuddy 版本选择
+======================================================================
+
+  1. 国内版（数据目录 ~/.workbuddy）
+  2. 国际版（数据目录 ~/.workbuddy-ai）
+
+请选择 WorkBuddy 版本（输入序号，默认 1）:
+```
+
+选择版本后进入账号选择：
 
 ```
 ======================================================================
@@ -95,9 +109,16 @@ python3 scripts/migrate.py --source <USER_ID>
 # 显式指定目标账号（不依赖当前登录态推断，v1.4 新增）
 python3 scripts/migrate.py --source <USER_ID> --target <USER_ID>
 
+# 国际版（数据目录 ~/.workbuddy-ai）
+python3 scripts/migrate.py --intl
+python3 scripts/migrate.py --intl --diagnose
+python3 scripts/migrate.py --intl --source <USER_ID>
+
 # 回滚到指定备份
 python3 scripts/migrate.py --rollback <TAG>
 ```
+
+> **国内版 vs 国际版**：唯一区别是数据目录不同——国内版使用 `~/.workbuddy/`，国际版使用 `~/.workbuddy-ai/`。其他命令和行为完全一致。不加 `--intl` 默认操作国内版。
 
 ### 迁移内容
 
@@ -126,10 +147,14 @@ python3 scripts/migrate.py --rollback <TAG>
 
 | 平台 | 状态 |
 |:---|:---|
-| WorkBuddy (macOS) | ✅ 已测试 |
-| WorkBuddy (Windows) | ✅ 已适配（v1.4，`%APPDATA%` 路径，欢迎实测反馈） |
-| WorkBuddy (Linux) | ✅ 已适配（v1.4，`XDG_CONFIG_HOME` 路径，欢迎实测反馈） |
+| WorkBuddy 国内版 (macOS) | ✅ 已测试 |
+| WorkBuddy 国内版 (Windows) | ✅ 已适配（v1.4，`%APPDATA%` 路径，欢迎实测反馈） |
+| WorkBuddy 国内版 (Linux) | ✅ 已适配（v1.4，`XDG_CONFIG_HOME` 路径，欢迎实测反馈） |
+| WorkBuddy 国际版 (Windows) | ✅ 已测试（v1.5，数据目录 `~/.workbuddy-ai/`，使用 `--intl` 参数） |
+| WorkBuddy 国际版 (macOS / Linux) | ⚠️ 理论支持，未实测 |
 | CodeBuddy CLI | ❌ 不适用（见下方说明） |
+
+> **国内版 vs 国际版**：国内版数据目录为 `~/.workbuddy/`，国际版为 `~/.workbuddy-ai/`。迁移工具默认操作国内版，加 `--intl` 参数操作国际版。交互式向导会提示选择版本。
 
 **为什么不支持 CodeBuddy CLI？** CodeBuddy CLI 的记忆按项目维度隔离（`~/.codebuddy/memories/{project-id}/`），对话记录按 `{sessionId}.jsonl` 独立文件存储，不依赖 `user_id` 过滤，**不存在账号切换后数据丢失的问题**。如果你是 CodeBuddy 用户遇到类似问题，欢迎提 Issue。
 
@@ -204,6 +229,14 @@ workbuddy-account-migrate/
 
 ### 更新日志
 
+#### v1.5.0 (2026-09-09)
+
+**国内版 / 国际版双版本支持**
+
+- **新增**：支持 WorkBuddy 国际版（数据目录 `~/.workbuddy-ai/`），通过 `--intl` 参数或交互式向导选择
+- **改进**：交互式向导新增版本选择步骤，展示两个版本的路径区别
+- **默认行为**：不加参数默认操作国内版（`~/.workbuddy/`），与其他模式兼容
+
 #### v1.4.0 (2026-08-06)
 
 **跨平台支持 + 当前账号识别修复**（感谢 [@yuren238](https://github.com/yuren238)，PR #1）
@@ -256,7 +289,19 @@ cd workbuddy-account-migrate
 python3 scripts/migrate.py
 ```
 
-Interactive wizard — just pick a number, no user_id knowledge required.
+Interactive wizard — pick your edition (domestic or international), then select accounts by number.
+
+**Other modes:**
+
+```bash
+python3 scripts/migrate.py --diagnose              # Diagnose only
+python3 scripts/migrate.py --source <USER_ID>      # Specify source account
+python3 scripts/migrate.py --intl                  # International edition (~/.workbuddy-ai)
+python3 scripts/migrate.py --intl --diagnose       # Diagnose international edition
+python3 scripts/migrate.py --rollback <TAG>        # Rollback to backup
+```
+
+> **Domestic vs International**: the only difference is the data directory — domestic uses `~/.workbuddy/`, international uses `~/.workbuddy-ai/`. Default is domestic; pass `--intl` for international.
 
 ### What Gets Migrated
 
@@ -272,6 +317,7 @@ Skills, Automations, Settings are global (no user_id) — no migration needed.
 
 - 🧙 Interactive wizard (pick target & source accounts by number, no user_id needed)
 - 🖥️ Cross-platform: storage.json path auto-detected for macOS / Windows / Linux (v1.4)
+- 🌍 Domestic / International edition: interactive wizard prompts for edition, or use `--intl` for `~/.workbuddy-ai`
 - 🔒 Safe: append-only memory, deep-merge connectors, WAL checkpoint before & after
 - 🔍 Authoritative login detection: storage.json first, DB session-count as cross-check (v1.4)
 - ✅ Post-migration verification (source user_id must be zero)
@@ -279,11 +325,22 @@ Skills, Automations, Settings are global (no user_id) — no migration needed.
 
 ### Compatibility
 
-- ✅ WorkBuddy macOS (tested)
-- ✅ WorkBuddy Windows / Linux (paths adapted in v1.4, feedback welcome)
+- ✅ WorkBuddy Domestic edition — macOS (tested), Windows / Linux (paths adapted in v1.4)
+- ✅ WorkBuddy International edition — Windows (data dir `~/.workbuddy-ai/`, use `--intl`, v1.5, tested)
+- ⚠️ WorkBuddy International edition — macOS / Linux (theoretically supported, untested)
 - ❌ CodeBuddy CLI (not needed — it uses project-level isolation, not user-level)
 
+> **Domestic vs International**: domestic edition stores data in `~/.workbuddy/`, international in `~/.workbuddy-ai/`. The migration tool defaults to domestic; pass `--intl` for international.
+
 ### Changelog
+
+#### v1.5.0 (2026-09-09)
+
+**Domestic / International edition support**
+
+- **New**: support for WorkBuddy International edition (data directory `~/.workbuddy-ai/`) via `--intl` flag or interactive wizard selection
+- **Improved**: interactive wizard now prompts for edition choice with path details
+- **Default**: without `--intl`, operates on domestic edition (`~/.workbuddy/`) as before
 
 #### v1.4.0 (2026-08-06)
 
