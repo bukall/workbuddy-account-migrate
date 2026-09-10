@@ -33,8 +33,14 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+def _home() -> Path:
+    """home 目录，支持环境变量覆盖（测试时指向临时 fixture，不碰真实数据）"""
+    env = os.environ.get("WORKBUDDY_MIGRATE_HOME")
+    return Path(env) if env else Path.home()
+
+
 # WorkBuddy 数据目录：国内版 ~/.workbuddy，国际版 ~/.workbuddy-ai
-WORKBUDDY_DIR = Path.home() / ".workbuddy"
+WORKBUDDY_DIR = _home() / ".workbuddy"
 DB_PATH = WORKBUDDY_DIR / "workbuddy.db"
 MEMORY_DIR = WORKBUDDY_DIR / "memory"
 CONNECTORS_DIR = WORKBUDDY_DIR / "connectors"
@@ -49,9 +55,9 @@ def _setup_paths(edition):
     """
     global WORKBUDDY_DIR, DB_PATH, MEMORY_DIR, CONNECTORS_DIR, TASKS_DIR, BACKUP_DIR
     if edition == "intl":
-        WORKBUDDY_DIR = Path.home() / ".workbuddy-ai"
+        WORKBUDDY_DIR = _home() / ".workbuddy-ai"
     else:
-        WORKBUDDY_DIR = Path.home() / ".workbuddy"
+        WORKBUDDY_DIR = _home() / ".workbuddy"
     DB_PATH = WORKBUDDY_DIR / "workbuddy.db"
     MEMORY_DIR = WORKBUDDY_DIR / "memory"
     CONNECTORS_DIR = WORKBUDDY_DIR / "connectors"
@@ -80,13 +86,36 @@ STORAGE_JSON = _get_storage_json_path()
 BACKUP_DIR = WORKBUDDY_DIR / "migrate_backups"
 
 
+def get_account_snapshot_uid():
+    """从数据目录内的账号快照读取当前登录 user_id
+
+    路径：{数据目录}/storage/skeleton/account-snapshot.json → primary.uid
+
+    相比平台 storage.json 的优势：
+      - 就在数据目录里，天然区分国内版 / 国际版
+      - 跨平台路径统一，不依赖 %APPDATA% / ~/Library 探测（部分机器上探测不到）
+    """
+    try:
+        snap = WORKBUDDY_DIR / "storage" / "skeleton" / "account-snapshot.json"
+        if snap.exists():
+            with open(snap, encoding="utf-8") as f:
+                data = json.load(f)
+            uid = (data.get("primary") or {}).get("uid", "")
+            if uid:
+                return uid
+    except Exception:
+        pass
+    return ""
+
+
 def get_current_user_id():
     """获取当前登录的 user_id
 
     优先级策略：
-    1. 从 storage.json 的 genie.userId 读取（登录态的权威来源）
-    2. 从 workbuddy.db 中 session 数量最多的 user_id 推断（辅助验证）
-    3. 如果两者不一致，优先使用 storage.json，并发出警告
+    1. 从数据目录内的 account-snapshot.json 读取（最权威，分版本、跨平台）
+    2. 从 storage.json 的 genie.userId 读取（备选，依赖平台路径探测）
+    3. 从 workbuddy.db 中 session 数量最多的 user_id 推断（辅助验证）
+    4. 如果前两者不一致，优先使用快照/storage.json，并发出警告
 
     ⚠️  注意：不能用"最新 session"来判断当前账号！
     因为旧账号在切换前的最后一条 session 可能比当前账号的 session 更新，
@@ -95,7 +124,12 @@ def get_current_user_id():
     db_uid = ""
     storage_uid = ""
 
-    # 方法1：从 storage.json 读取（最权威，代表实际登录状态）
+    # 方法1（最优先）：数据目录内的账号快照
+    snapshot_uid = get_account_snapshot_uid()
+    if snapshot_uid:
+        return snapshot_uid
+
+    # 方法2：从 storage.json 读取（依赖平台路径，部分机器探测不到）
     try:
         with open(STORAGE_JSON, encoding="utf-8") as f:
             data = json.load(f)
@@ -103,7 +137,7 @@ def get_current_user_id():
     except Exception:
         pass
 
-    # 方法2：从 DB 推断——用 session 数量最多的 user_id（而非最新 session）
+    # 方法3：从 DB 推断——用 session 数量最多的 user_id（而非最新 session）
     # 避免被偶发的旧账号 session 欺骗
     if DB_PATH.exists():
         try:
@@ -365,7 +399,8 @@ def migrate_memory(source_uid, target_uid):
         return
 
     if not dst_file.exists():
-        # 目标不存在，直接复制
+        # 目标不存在，直接复制（memory 目录本身也可能不存在）
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
         dst_file.write_text(src_content, encoding="utf-8")
         print(f"  ✅ 复制 Memory（目标为空，直接复制 {len(src_content)} 字符）")
         return
@@ -559,22 +594,28 @@ def rollback(backup_tag):
         shutil.copy2(str(db_backup), str(DB_PATH))
         print("  ✅ 已恢复数据库")
 
-    # 恢复 Memory
-    if target_uid:
+    if not target_uid:
+        print("  ⚠️  备份缺少目标账号信息（meta.json 不完整），跳过 Memory / Connectors 恢复")
+        print("     （target_uid 为空时路径会退化成整个目录，不能做任何删除操作）")
+    else:
+        # 恢复 Memory：只要备份里有就恢复，不要求目标文件当前必须存在
         mem_backup = backup_path / f"{target_uid}_memory.md"
-        mem_target = MEMORY_DIR / f"{target_uid}_memory.md"
-        if mem_backup.exists() and mem_target.exists():
-            shutil.copy2(str(mem_backup), str(mem_target))
+        if mem_backup.exists():
+            MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(mem_backup), str(MEMORY_DIR / f"{target_uid}_memory.md"))
             print("  ✅ 已恢复 Memory")
 
-    # 恢复 Connectors
-    conn_backup = backup_path / target_uid
-    conn_target = CONNECTORS_DIR / target_uid
-    if conn_backup.exists() and conn_target.exists():
-        if conn_target.exists():
-            shutil.rmtree(str(conn_target))
-        shutil.copytree(str(conn_backup), str(conn_target))
-        print("  ✅ 已恢复 Connectors")
+        # 恢复 Connectors：同样只看备份里有没有。
+        # 目标目录当前不存在是常见情况（比如迁移后手动清理过），此时应当重建而不是跳过。
+        conn_backup = backup_path / target_uid
+        conn_target = CONNECTORS_DIR / target_uid
+        if conn_backup.exists():
+            if conn_target.exists():
+                shutil.rmtree(str(conn_target))
+            shutil.copytree(str(conn_backup), str(conn_target))
+            print("  ✅ 已恢复 Connectors")
+        else:
+            print("  ⏭️  备份中没有 Connector 数据，跳过")
 
     print("\n  ⚠️  请重启 WorkBuddy 客户端让变更生效！")
 

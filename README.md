@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform: macOS | Windows | Linux](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://www.python.org/)
-[![Version 1.5.0](https://img.shields.io/badge/Version-1.5.0-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
+[![Version 1.6.0](https://img.shields.io/badge/Version-1.6.0-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 
 **[English](#english) | [中文](#chinese)**
 
@@ -131,6 +131,77 @@ python3 scripts/migrate.py --rollback <TAG>
 | Automations 定时任务 | `workbuddy.db` automations 表 | 无 user_id | ❌ | 全局共享，无需迁移 |
 | Settings / MCP / Plugins | 全局配置文件 | 无隔离 | ❌ | 全局共享，无需迁移 |
 
+### 单对话跨版本迁移（v1.6.0）
+
+上面是「整个账号」的迁移。如果你只想把**某一个对话**从国内版搬到国际版（或反过来），用另一个脚本：
+
+```bash
+python3 scripts/migrate_session.py                 # 交互式向导，一步到位
+python3 scripts/migrate_session.py --list          # 先看看国内版有哪些对话
+python3 scripts/migrate_session.py --from domestic --to intl --session-id <SESSION_ID>
+```
+
+**与整账号迁移的区别**
+
+| | `migrate.py` | `migrate_session.py` |
+|:---|:---|:---|
+| 范围 | 整个账号（全部对话 + 记忆 + 连接器） | **一个对话** |
+| 版本 | 同一版本内 | **支持国内 ⇄ 国际** |
+| 默认语义 | 合并（源保留） | **移动（源删除）**，可 `--mode copy` |
+
+**⚠️ 迁移前必须关闭两个版本的 WorkBuddy 窗口**，脚本会检测并拒绝执行。原因：数据还在 WAL 里没落盘、客户端内存缓存会覆盖你的写入。
+
+**一个对话实际包含哪些东西**（少一样客户端就显示异常）：
+
+| 数据 | 位置 | 说明 |
+|:---|:---|:---|
+| session 行 | `workbuddy.db` sessions 表 | 跨库插入，`user_id` 改写为目标版本账号 |
+| 用量行 | `session_usage` 表 | token 统计 |
+| 工作区登记 | `workspaces` 表 | 否则客户端找不到路径 |
+| **对话正文** | `projects/{slug}/{id}.jsonl` | **不复制的话对话是空的** |
+
+**冲突处理**（目标已存在时询问，并展示差异帮你判断）：
+
+```
+⚠️  目标版本已存在【标题相同】但 ID 不同的对话
+  原因：标题一致但 id 不同，很可能是同一段对话被迁移过一次，
+       再次迁移会在客户端里出现两条看起来一样的对话。
+
+  指标          目标现有（将被覆盖）        源（将写入）
+  ─────────────────────────────────────────────────────────
+  ★ 最后活动    09-10 08:26                09-10 15:02
+  ★ 消息数      5 条（我 5 / AI 0）         26 条（我 3 / AI 23）
+  ★ 对话大小    453 B · 5 行               605.6 KB · 140 行
+    最后提问    老的提问内容                …
+  ─────────────────────────────────────────────────────────
+  → 源比目标新 6 小时 36 分钟，消息多 21 条，内容远超目标（约 1369 倍）
+  → 建议：覆盖（源更新且更完整）
+
+  请确认 [y] 覆盖 / [s] 不覆盖（跳过该对话） / [n] 不操作（取消）:
+```
+
+- **硬冲突**（ID 相同）：`覆盖` / `不操作`
+- **软冲突**（标题相同、ID 不同）：`覆盖` / `不覆盖` / `不操作`
+- 覆盖时始终以**源的 ID** 写入并删除目标那条旧记录，保证正文文件名与 ID 一致
+
+**参数**
+
+| 参数 | 说明 | 默认 |
+|:---|:---|:---|
+| `--from` / `--to` | 源/目标版本 `domestic`\|`intl` | `domestic` |
+| `--session-id` | 对话 id（支持前缀） | - |
+| `--mode` | `move`（迁移后删源）/ `copy`（保留） | **`move`** |
+| `--on-conflict` | `ask`/`skip`/`overwrite`/`newer`（无终端询问时 `ask` 降级为 `skip`） | `ask` |
+| `--dry-run` | 只打印计划不写盘 | 关 |
+| `--force` | 跳过"客户端必须关闭"检测 | 关 |
+| `--backups` / `--rollback TAG` | 查看备份 / 回滚 | - |
+
+回滚精确到单条，不影响其他对话：`python3 scripts/migrate_session.py --rollback <TAG>`。
+
+> ⚠️ **平台说明**：单对话迁移**仅 Windows 实测通过**（Windows 11 + Python 3.13）。
+> macOS / Linux 的路径逻辑沿用 `migrate.py` 的跨平台实现（路径走 pathlib、进程检测
+> Windows 用 `tasklist`、其他平台用 `ps`），但未经实测，欢迎提 Issue 反馈。
+
 ### 工作原理
 
 **Step 1：自动诊断** — 从数据库、Memory 文件、Connector 目录三个来源自动发现所有账号。当前登录账号以 **storage.json 的 genie.userId 为权威来源**，DB 中 session 数最多的 user_id 作为辅助验证，不一致时以 storage.json 为准并发出警告（v1.4 起；此前用"最新 session"推断，旧账号的最后一条 session 可能比当前账号更新，导致误判）。
@@ -216,10 +287,21 @@ workbuddy-account-migrate/
 ├── .gitignore                             # 排除敏感文件
 ├── SKILL.md                               # WorkBuddy Skill 描述符
 ├── scripts/
-│   └── migrate.py                         # 核心迁移脚本
+│   ├── migrate.py                         # 整账号迁移（同版本内）
+│   └── migrate_session.py                 # 单对话迁移（支持跨版本，v1.6）
+├── tests/
+│   ├── prepare_fixture.py                 # 构造临时测试 fixture（只读复制真实数据）
+│   └── run_tests.py                       # 端到端测试（45 项）
 └── references/
     └── data_isolation_map.md              # 数据隔离全景图
 ```
+
+> 测试全部在临时 fixture 中运行，不会触碰真实数据目录。
+> `python3 tests/run_tests.py` 即可复现全部验证。
+>
+> ⚠️ **测试脚本仅 Windows 实测通过**（Windows 11 + Python 3.13）。fixture 复制的是本机真实
+> WorkBuddy 数据，其中 session 的 cwd 与 projects 目录名均为 Windows 路径格式。
+> macOS / Linux 未测试：本机若未安装并登录过 WorkBuddy，将造不出 fixture。
 
 ### 贡献
 
@@ -228,6 +310,31 @@ workbuddy-account-migrate/
 - Windows / Linux 实测反馈 → 欢迎 Issue
 
 ### 更新日志
+
+#### v1.6.0 (2026-09-10)
+
+**新增：`scripts/migrate_session.py` — 单对话跨版本迁移**
+
+只迁移**指定的一个对话**，并支持**国内版 ⇄ 国际版**双向：
+
+- 默认 `move`（迁移后删除源版本中的该对话），可选 `--mode copy` 保留源
+- 迁移单元完整：**session 行 + `session_usage` + `workspaces` 登记 + `projects/*.jsonl` 对话正文**。只搬数据库行是不够的，正文不在数据库里，漏了对话就是空的
+- 跨版本迁移自动把 `user_id` 改写为目标版本当前登录账号，否则目标版本里依然看不到
+- 冲突分级询问：
+  - 硬冲突（ID 相同）→ 覆盖 / 不操作
+  - 软冲突（标题相同、ID 不同，多为重复迁移）→ 覆盖 / 不覆盖 / 不操作
+  - 询问时展示差异对比（最后活动时间、消息数、对话大小、工具调用、token 用量、最后提问）并给出覆盖建议
+- 覆盖时始终以**源的 ID** 写入并删除目标那条旧记录，保证正文文件名与 ID 一致
+- 备份精确到单条，回滚不影响其他对话；`--dry-run` 可先预览
+- 安全：迁移前检测客户端是否运行，**未关闭则拒绝执行**（WAL 未落盘 + 内存缓存会覆盖写入）
+- 新增 `tests/`：`prepare_fixture.py` 从真实数据只读复制出临时 fixture，`run_tests.py` 提供 45 项端到端测试，全程在临时目录运行
+
+**改进：原有 `scripts/migrate.py`**
+
+- 当前账号识别改用数据目录内的 `storage/skeleton/account-snapshot.json` → `primary.uid`，天然区分国内版 / 国际版、跨平台路径统一；平台 `storage.json` 降为备选（部分机器上 `%APPDATA%` 探测不到）
+- 回滚安全性：备份 `meta.json` 缺失导致 `target_uid` 为空时，跳过 Memory / Connectors 恢复。原先路径会退化成整个 `connectors/` 目录并被 `rmtree` **删光所有账号的连接器配置**
+- 回滚完整性：Connectors / Memory 的恢复不再要求目标当前必须存在，只要备份里有就恢复。原先迁移后清理过目录就恢复不了
+- Memory 迁移在 `memory/` 目录不存在时自动创建，不再报错
 
 #### v1.5.0 (2026-09-09)
 
@@ -332,7 +439,40 @@ Skills, Automations, Settings are global (no user_id) — no migration needed.
 
 > **Domestic vs International**: domestic edition stores data in `~/.workbuddy/`, international in `~/.workbuddy-ai/`. The migration tool defaults to domestic; pass `--intl` for international.
 
+### Single-session cross-edition migration
+
+To move **one conversation** between editions (domestic ⇄ international), use the second script:
+
+```bash
+python3 scripts/migrate_session.py                 # interactive wizard
+python3 scripts/migrate_session.py --from domestic --to intl --session-id <ID>
+```
+
+- **Close both WorkBuddy clients first** — the script refuses to run otherwise (WAL not flushed + in-memory cache would overwrite your changes).
+- Default is `move` (deletes the source after migrating); use `--mode copy` to keep it.
+- If the target already has the conversation, you get a diff (last activity / message count / size / last prompt) and a choice: overwrite / skip / cancel.
+- Migrates the session row, usage stats, workspace entry **and** the `projects/*.jsonl` transcript — without the transcript the conversation opens empty.
+
 ### Changelog
+
+#### v1.6.0 (2026-09-10)
+
+**Single-session cross-edition migration (domestic ⇄ international)**
+
+- **New**: `scripts/migrate_session.py` — migrate one conversation between editions
+- **New**: carries `session_usage`, `workspaces` and the `projects/*.jsonl` transcript along (DB row alone = empty conversation)
+- **New**: conflict prompts — hard conflict (same ID) offers 2 choices, soft conflict (same title, different ID) offers 3, both with a side-by-side diff and an overwrite recommendation
+- **New**: `move` by default, `copy` optional; per-session backup, rollback touches nothing else
+- **Improved**: current account now resolved from `storage/skeleton/account-snapshot.json` inside the data dir (edition-aware, cross-platform)
+- **Safety**: refuses to run while a WorkBuddy client is running
+- **Tests**: new `tests/` with fixture builder + 45 end-to-end checks, all in a temp dir
+
+**Changes to the existing `migrate.py`:**
+
+- Current account detection now uses `storage/skeleton/account-snapshot.json`
+- Rollback safety: if `meta.json` is missing and `target_uid` is empty, Memory/Connectors restore is skipped — the path would otherwise degrade to the whole `connectors/` dir and `rmtree` **every account's config**
+- Rollback completeness: Connectors/Memory are restored whenever the backup has them, even if the target no longer exists
+- Memory migration creates `memory/` when missing instead of crashing
 
 #### v1.5.0 (2026-09-09)
 
