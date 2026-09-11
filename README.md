@@ -159,6 +159,7 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <SESSI
 | 用量行 | `session_usage` 表 | token 统计 |
 | 工作区登记 | `workspaces` 表 | 否则客户端找不到路径 |
 | **对话正文** | `projects/{slug}/{id}.jsonl` | **不复制的话对话是空的** |
+| 工具结果 | `projects/{slug}/{id}/tool-results/*.txt` | 大工具输出外溢目录，缺失会丢内容 |
 
 **冲突处理**（目标已存在时询问，并展示差异帮你判断）：
 
@@ -183,6 +184,19 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <SESSI
 - **硬冲突**（ID 相同）：`覆盖` / `不操作`
 - **软冲突**（标题相同、ID 不同）：`覆盖` / `不覆盖` / `不操作`
 - 覆盖时始终以**源的 ID** 写入并删除目标那条旧记录，保证正文文件名与 ID 一致
+
+**同版本复制**（`--from` 与 `--to` 相同）
+
+同一版本内有两种语义，脚本会自动判断：
+
+| 情况 | 行为 |
+|:---|:---|
+| 源对话属于**别的账号** | 只把 `user_id` 改到当前账号（归属转移） |
+| 源对话**已属于当前账号** | 克隆出一条新对话：新的 session id，标题加「（副本）」 |
+
+克隆会一并处理三件容易漏掉的事：正文文件按新 id 改名、正文内部每条消息的
+`"sessionId"` 全部改写为新 id、工具结果目录 `tool-results/` 一起复制。
+原对话保持不变，回滚只删副本、不动原对话。
 
 **参数**
 
@@ -291,7 +305,7 @@ workbuddy-account-migrate/
 │   └── migrate_session.py                 # 单对话迁移（支持跨版本，v1.6）
 ├── tests/
 │   ├── prepare_fixture.py                 # 构造临时测试 fixture（只读复制真实数据）
-│   └── run_tests.py                       # 端到端测试（45 项）
+│   └── run_tests.py                       # 端到端测试（61 项）
 └── references/
     └── data_isolation_map.md              # 数据隔离全景图
 ```
@@ -327,7 +341,26 @@ workbuddy-account-migrate/
 - 覆盖时始终以**源的 ID** 写入并删除目标那条旧记录，保证正文文件名与 ID 一致
 - 备份精确到单条，回滚不影响其他对话；`--dry-run` 可先预览
 - 安全：迁移前检测客户端是否运行，**未关闭则拒绝执行**（WAL 未落盘 + 内存缓存会覆盖写入）
-- 新增 `tests/`：`prepare_fixture.py` 从真实数据只读复制出临时 fixture，`run_tests.py` 提供 45 项端到端测试，全程在临时目录运行
+- 新增 `tests/`：`prepare_fixture.py` 从真实数据只读复制出临时 fixture，`run_tests.py` 提供 61 项端到端测试，全程在临时目录运行
+
+**修复：正文含 `tool-results/` 目录时备份直接崩溃**
+
+- 大工具输出会被外溢到 `projects/{slug}/{id}/tool-results/*.txt`（一个与会话同名的**目录**）。
+  备份阶段对目录调用 `shutil.copy2()` 在 Windows 上抛 `PermissionError: [Errno 13]`，
+  整个迁移中断。现在文件与目录统一走 `copy_path()` / `remove_path()`
+- 同一根因还波及迁移复制、move 删源、回滚还原、软冲突清理旧记录四处，一并修复
+- 对话大小统计改为递归累加，此前 `tool-results/` 被算成 0，显示的体积偏小
+- 列表里区分显示「N 个文件 + N 个目录（tool-results）」，不再让人误以为多出异常项
+
+**修复：同版本选 copy 时提示「无需迁移」却什么也没做**
+
+- `_migrate_intra` 原先只实现「改 `user_id`」一种语义，源对话已属于当前账号时无从可改就空转
+- 现在自动按**克隆**处理：生成新 session id，标题加「（副本）」，复制正文与任务数据
+- 克隆会改写正文中每条消息的 `"sessionId"`（否则副本内部仍指向原对话）、
+  并按新 id 重命名正文文件与 `tool-results/` 目录
+- 回滚按 `kind=session_clone` 单独处理，**只删副本、不动原对话**
+  （走通用回滚分支会按原 id 删行，把原始对话一起删掉）
+- 备份中途失败会自清理，不再残留没有 `meta.json` 的半成品目录
 
 **改进：原有 `scripts/migrate.py`**
 
@@ -465,7 +498,23 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <ID>
 - **New**: `move` by default, `copy` optional; per-session backup, rollback touches nothing else
 - **Improved**: current account now resolved from `storage/skeleton/account-snapshot.json` inside the data dir (edition-aware, cross-platform)
 - **Safety**: refuses to run while a WorkBuddy client is running
-- **Tests**: new `tests/` with fixture builder + 45 end-to-end checks, all in a temp dir
+- **Tests**: new `tests/` with fixture builder + 61 end-to-end checks, all in a temp dir
+
+**Fixed: backup crashed when the transcript included a `tool-results/` directory**
+
+- Large tool outputs spill to `projects/{slug}/{id}/tool-results/*.txt` — a **directory** named after the session.
+  `shutil.copy2()` on it raised `PermissionError: [Errno 13]` on Windows and aborted the whole migration.
+  Files and directories now go through a shared `copy_path()` / `remove_path()`.
+- Same root cause affected migration copy, `move` source deletion, rollback restore and soft-conflict cleanup — all fixed.
+- Size reporting now recurses into directories (previously `tool-results/` counted as 0).
+
+**Fixed: same-edition `copy` said "nothing to migrate" and did nothing**
+
+- `_migrate_intra` only implemented the "reassign `user_id`" case; when the session already belonged to the current account there was nothing to reassign, so it bailed out.
+- It now clones: new session id, title suffixed with 「（副本）」, transcript and task data copied.
+- The clone rewrites every in-transcript `"sessionId"` and renames the transcript / `tool-results/` to the new id.
+- Rollback handles `kind=session_clone` separately — it removes only the copy, never the original.
+- A failed backup now cleans itself up instead of leaving a half-written directory.
 
 **Changes to the existing `migrate.py`:**
 

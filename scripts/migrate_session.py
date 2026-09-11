@@ -48,6 +48,7 @@ import sqlite3
 import subprocess
 import sys
 import unicodedata
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -499,10 +500,71 @@ class SessionInfo:
 
 
 def find_project_files(ep: EditionPaths, session_id: str):
-    """定位对话正文文件：projects/{slug}/{sid}.jsonl 及其附属文件"""
+    """定位对话正文文件：projects/{slug}/{sid}.jsonl 及其附属文件
+
+    注意：这里的“文件”可能包含【目录】。WorkBuddy 会把体积较大的工具调用结果
+    外溢到 projects/{slug}/{sid}/tool-results/*.txt，即与会话同名的目录。
+    因此所有对返回值的拷贝 / 删除都必须走 copy_path() / remove_path()，
+    不能直接用 shutil.copy2() 或 Path.unlink()，否则在 Windows 上会抛
+    PermissionError / IsADirectoryError。
+    """
     if not ep.projects_dir.exists():
         return []
     return sorted(ep.projects_dir.glob(f"*/{session_id}*"))
+
+
+def path_size(p: Path) -> int:
+    """统计占用空间：目录需递归累加内部文件，否则 tool-results 会被算成 0"""
+    try:
+        if p.is_dir():
+            return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+        return p.stat().st_size
+    except OSError:
+        return 0
+
+
+def copy_path(src: Path, dst: Path):
+    """复制文件或目录（目录走 copytree，目标已存在则先整体删除）"""
+    if src.is_dir():
+        if dst.exists():
+            remove_path(dst)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(str(src), str(dst))
+    else:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src), str(dst))
+
+
+def remove_path(p: Path):
+    """删除文件或目录；不存在则静默返回"""
+    try:
+        if p.is_dir():
+            shutil.rmtree(str(p))
+        elif p.exists():
+            p.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _abort_backup(bp: Path, msg: str):
+    """备份中途失败：删掉半成品目录后再中止
+
+    半截备份没有 meta.json，既不能回滚又会在 --backups 里留下一条找不到的记录。
+    """
+    shutil.rmtree(str(bp), ignore_errors=True)
+    raise RuntimeError(msg)
+
+
+def safe_copy(src: Path, dst: Path) -> bool:
+    """复制文件或目录，成功返回 True；失败只打印可操作的提示，不抛原始 traceback"""
+    try:
+        copy_path(src, dst)
+        return True
+    except OSError as e:
+        kind = "目录" if src.is_dir() else "文件"
+        print(f"  ⚠️  无法复制{kind} {src.name}：{e}")
+        print("     常见原因：WorkBuddy 客户端未完全退出、文件被其他进程占用，或权限不足。")
+        return False
 
 
 def scan_jsonl(path: Path):
@@ -580,7 +642,7 @@ def collect_info(ep: EditionPaths, row: dict, deep=True) -> SessionInfo:
         updated_at=int(row.get("updated_at") or 0),
         last_activity_at=int(row.get("last_activity_at") or 0),
         files=files,
-        file_size=sum(f.stat().st_size for f in files if f.exists()),
+        file_size=sum(path_size(f) for f in files if f.exists()),
         has_tasks=(ep.tasks_dir / sid).exists() if ep.tasks_dir else False,
     )
 
@@ -716,6 +778,20 @@ def render_diff(src: SessionInfo, dst: SessionInfo, kind: str) -> str:
     return "\n".join(lines)
 
 
+def _files_desc(files) -> str:
+    """正文文件描述：区分普通文件与 tool-results 目录，避免用户误以为多出异常项"""
+    if not files:
+        return "-"
+    dirs = [f for f in files if f.is_dir()]
+    n = len(files) - len(dirs)
+    parts = []
+    if n:
+        parts.append(f"{n} 个文件")
+    if dirs:
+        parts.append(f"{len(dirs)} 个目录（tool-results）")
+    return " + ".join(parts)
+
+
 def render_single(info: SessionInfo) -> str:
     """渲染单个对话的摘要（无冲突时使用）"""
     w1 = 14
@@ -729,7 +805,7 @@ def render_single(info: SessionInfo) -> str:
         f"  {pad('对话大小', w1)}{fmt_size(info.file_size)} · {info.line_count} 行",
         f"  {pad('工具调用', w1)}{info.tool_calls} 次",
         f"  {pad('工作目录', w1)}{clip(info.cwd, 50)}",
-        f"  {pad('正文文件', w1)}{len(info.files)} 个",
+        f"  {pad('正文文件', w1)}{_files_desc(info.files)}",
     ]
     if info.last_user_msg:
         lines.append(f"  {pad('最后提问', w1)}{clip(info.last_user_msg.replace(chr(10), ' '), 50)}")
@@ -796,9 +872,11 @@ def create_backup(src_ep, dst_ep, src_row, dst_row, session_id, mode,
     if src_files:
         (bp / "files").mkdir(exist_ok=True)
         for f in src_files:
-            if f.exists():
-                shutil.copy2(str(f), str(bp / "files" / f.name))
-                meta["src_files"].append({"name": f.name, "path": str(f)})
+            if not f.exists():
+                continue
+            if not safe_copy(f, bp / "files" / f.name):
+                _abort_backup(bp, "备份不完整，已中止迁移（未改动任何数据）")
+            meta["src_files"].append({"name": f.name, "path": str(f), "is_dir": f.is_dir()})
 
     # 目标原有行 + 原文件（覆盖场景）
     if dst_row:
@@ -809,9 +887,11 @@ def create_backup(src_ep, dst_ep, src_row, dst_row, session_id, mode,
         if dst_files:
             (bp / "dst_files").mkdir(exist_ok=True)
             for f in dst_files:
-                if f.exists():
-                    shutil.copy2(str(f), str(bp / "dst_files" / f.name))
-                    meta["dst_files"].append({"name": f.name, "path": str(f)})
+                if not f.exists():
+                    continue
+                if not safe_copy(f, bp / "dst_files" / f.name):
+                    _abort_backup(bp, "备份不完整，已中止迁移（未改动任何数据）")
+                meta["dst_files"].append({"name": f.name, "path": str(f), "is_dir": f.is_dir()})
 
     # 软冲突：被覆盖的那条目标记录（id 与源不同）
     if extra_row:
@@ -822,11 +902,13 @@ def create_backup(src_ep, dst_ep, src_row, dst_row, session_id, mode,
         if ov_files:
             (bp / "override_files").mkdir(exist_ok=True)
             for f in ov_files:
-                if f.exists():
-                    shutil.copy2(str(f), str(bp / "override_files" / f.name))
-                    meta.setdefault("override_files", []).append(
-                        {"name": f.name, "path": str(f)}
-                    )
+                if not f.exists():
+                    continue
+                if not safe_copy(f, bp / "override_files" / f.name):
+                    _abort_backup(bp, "备份不完整，已中止迁移（未改动任何数据）")
+                meta.setdefault("override_files", []).append(
+                    {"name": f.name, "path": str(f), "is_dir": f.is_dir()}
+                )
         meta["override_id"] = extra_row.get("id", "")
 
     # usage 行
@@ -939,6 +1021,37 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
         print("\n  ✅ 回滚完成")
         return
 
+    # 同版本克隆：只删掉克隆出来的那条新对话，绝对不能碰原始对话
+    # （通用回滚会按 session_id 删行，而这里的 session_id 就是原始对话的 id，
+    #   走通用分支会把原对话一起删掉，所以必须单独处理）
+    if meta.get("kind") == "session_clone":
+        new_sid = meta.get("new_session_id", "")
+        if not new_sid:
+            print("  ⚠️  备份缺少 new_session_id，无法定位克隆产物，跳过")
+            return
+        conn = connect_rw(dst_ep.db)
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.execute("DELETE FROM sessions WHERE id = ?", (new_sid,))
+            conn.execute("DELETE FROM session_usage WHERE session_id = ?", (new_sid,))
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            print(f"  ✅ 已删除克隆出的对话 {new_sid[:8]}…")
+        finally:
+            conn.close()
+        for rel in meta.get("copied_to", []):
+            p = Path(rel)
+            if p.exists():
+                remove_path(p)
+                print(f"  ✅ 已删除 {p.name}")
+        if meta.get("cloned_tasks"):
+            td = dst_ep.tasks_dir / new_sid
+            if td.exists():
+                shutil.rmtree(str(td))
+                print("  ✅ 已删除克隆的任务数据")
+        print("\n  ✅ 回滚完成（原始对话未受影响）")
+        return
+
     # 精确回滚
     # 1) 目标侧：删除写入的行与文件，恢复被覆盖的原行/原文件
     conn = connect_rw(dst_ep.db)
@@ -987,21 +1100,20 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
         for f in meta.get("override_files", []):
             srcf = bp / "override_files" / f["name"]
             if srcf.exists():
-                Path(f["path"]).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(srcf), f["path"])
-                print(f"  ✅ 已还原 {f['name']}")
+                if safe_copy(srcf, Path(f["path"])):
+                    print(f"  ✅ 已还原 {f['name']}")
 
     # 删除复制过去的文件；若之前覆盖了目标文件则还原
     for rel in meta.get("copied_to", []):
         p = Path(rel)
         if p.exists():
-            p.unlink()
+            remove_path(p)  # 可能是复制过去的 tool-results 目录
             print(f"  ✅ 已删除 {p.name}")
     for f in meta.get("dst_files", []):
         srcf = bp / "dst_files" / f["name"]
         if srcf.exists():
-            shutil.copy2(str(srcf), f["path"])
-            print(f"  ✅ 已还原 {f['name']}")
+            if safe_copy(srcf, Path(f["path"])):
+                print(f"  ✅ 已还原 {f['name']}")
 
     # 2) 源侧：若迁移时删除了源，则插回
     if meta.get("source_deleted"):
@@ -1031,9 +1143,8 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
         for f in meta.get("src_files", []):
             srcf = bp / "files" / f["name"]
             if srcf.exists():
-                Path(f["path"]).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(srcf), f["path"])
-                print(f"  ✅ 已还原源文件 {f['name']}")
+                if safe_copy(srcf, Path(f["path"])):
+                    print(f"  ✅ 已还原源文件 {f['name']}")
 
     print("\n  ✅ 精确回滚完成（未影响其他对话）")
 
@@ -1140,14 +1251,22 @@ def do_migrate(src_ep, dst_ep, sid, mode="move", on_conflict="ask",
     sid = src_row["id"]
 
     if src_ep.name == dst_ep.name and src_ep.db == dst_ep.db:
-        return _migrate_intra(src_ep, src_row, target_uid, dry_run, assume_yes)
+        return _migrate_intra(src_ep, src_row, target_uid, dry_run, assume_yes, mode)
 
     return _migrate_cross(src_ep, dst_ep, src_row, mode, on_conflict,
                           dry_run, assume_yes, target_uid, backup_root)
 
 
-def _migrate_intra(ep, src_row, target_uid, dry_run, assume_yes):
-    """同版本迁移：只改 user_id（沿用 migrate.py 的做法）"""
+def _migrate_intra(ep, src_row, target_uid, dry_run, assume_yes, mode="move"):
+    """同版本迁移，两种语义：
+
+    1) 归属转移：源 user_id != 目标 uid → 只改 sessions.user_id（沿用 migrate.py 的做法）
+    2) 同版本复制：源 user_id == 目标 uid → 克隆出一条新对话（新 id）
+
+    第 2 种以前会直接打印「该对话已属于目标账号，无需迁移」然后退出，
+    但用户选了 copy 却没有归属可改时，真实意图是「在同一版本里多复制一份」，
+    空转是不符合预期的，所以这里必须真的复制一条出来。
+    """
     if not target_uid:
         target_uid, _src = get_current_uid(ep)
     if not target_uid:
@@ -1162,8 +1281,9 @@ def _migrate_intra(ep, src_row, target_uid, dry_run, assume_yes):
     print(f"\n  对话: {str(src_row.get('title'))[:50]}")
     print(f"  {old_uid[:12]}… → {target_uid[:12]}…")
     if old_uid == target_uid:
-        print("\n  ⏭️  该对话已属于目标账号，无需迁移")
-        return
+        # 归属无需变更：真正的诉求是复制一份，交给克隆逻辑处理
+        print("\n  ℹ️  该对话已属于当前账号，无归属可改 → 按「同版本复制」处理")
+        return _clone_intra(ep, src_row, target_uid, dry_run, assume_yes)
     if dry_run:
         print("\n  [dry-run] UPDATE sessions SET user_id=? WHERE id=?")
         return
@@ -1193,6 +1313,135 @@ def _migrate_intra(ep, src_row, target_uid, dry_run, assume_yes):
         conn.close()
     print(f"\n  ✅ 完成（验证命中 {n} 行）")
     print(f"  回滚: python3 scripts/migrate_session.py --rollback {bp.name}")
+
+
+def _rewrite_session_id(path: Path, old_sid: str, new_sid: str):
+    """把正文 jsonl 里内嵌的 sessionId 换成新 id
+
+    每条消息都带 "sessionId":"<sid>"，只改文件名不改正文会让副本内部仍指向原对话。
+    逐行流式替换，避免把几 MB 的正文整个读进内存。
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    # newline="" 保证 \r\n 原样保留，不被通用换行模式改写
+    with open(path, encoding="utf-8", errors="replace", newline="") as fin, \
+            open(tmp, "w", encoding="utf-8", newline="") as fout:
+        for line in fin:
+            fout.write(line.replace(old_sid, new_sid))
+    tmp.replace(path)
+
+
+def _clone_intra(ep, src_row, target_uid, dry_run, assume_yes):
+    """同版本内克隆一条对话：新 id + 复制正文（改写 sessionId）+ 任务数据 + 工具结果"""
+    sid = src_row["id"]
+    new_sid = str(uuid.uuid4())
+    old_title = (src_row.get("custom_title") or src_row.get("title") or "").strip()
+    new_title = old_title if "（副本）" in old_title else f"{old_title}（副本）"
+
+    src_info = collect_info(ep, src_row, deep=True)
+
+    print(f"\n  模式:      复制（同版本内克隆出新对话）")
+    print(f"  新对话 id: {new_sid}")
+    print(f"  新标题:    {new_title or '(无标题)'}")
+    print()
+    print("  【源对话】")
+    print(render_single(src_info))
+
+    if dry_run:
+        print("\n  [dry-run] 将执行：")
+        print(f"   1. INSERT sessions / session_usage（新 id {new_sid[:8]}…）")
+        print(f"   2. 复制 {len(src_info.files)} 项正文，"
+              f"共 {fmt_size(src_info.file_size)}（文件名换成新 id，正文内 sessionId 一并改写）")
+        if src_info.has_tasks:
+            print("   3. 复制任务数据")
+        return
+
+    if not assume_yes and not ask_yes_no(f"\n确认在{ep.label}内复制出一份？(y/N): "):
+        print("已取消")
+        return
+
+    # 备份仍以源 id 为准；kind=session_clone 让回滚只删克隆产物、不动原始对话
+    bp = create_backup(ep, ep, src_row, None, sid, "copy", None)
+    meta = json.loads((bp / "meta.json").read_text(encoding="utf-8"))
+    meta["kind"] = "session_clone"
+    meta["new_session_id"] = new_sid
+    meta["source_user_id"] = src_row.get("user_id", "")
+    meta["target_user_id"] = target_uid
+    meta["cloned_tasks"] = False
+    meta["copied_to"] = []   # 回滚按此列表删除克隆产物
+    (bp / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\n  📦 备份: {bp.name}")
+
+    conn = connect_rw(ep.db)
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        cols = table_columns(conn, "sessions")
+        row = dict(src_row)
+        row["id"] = new_sid
+        row["user_id"] = target_uid
+        # 标题打上副本标记，避免两条同名对话分不清
+        if "custom_title" in cols:
+            row["custom_title"] = new_title
+        elif "title" in cols:
+            row["title"] = new_title
+        ks = [k for k in row if k in cols]
+        conn.execute(
+            f"INSERT INTO sessions ({','.join(ks)}) VALUES ({','.join('?' * len(ks))})",
+            [row[k] for k in ks],
+        )
+
+        cur = conn.execute("SELECT * FROM session_usage WHERE session_id = ?", (sid,))
+        u = cur.fetchone()
+        if u:
+            ucols = [d[0] for d in cur.description]
+            urow = dict(zip(ucols, u))
+            urow["session_id"] = new_sid
+            ks2 = [k for k in urow if k in ucols]
+            conn.execute(
+                f"INSERT OR REPLACE INTO session_usage ({','.join(ks2)}) "
+                f"VALUES ({','.join('?' * len(ks2))})",
+                [urow[k] for k in ks2],
+            )
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        n = conn.execute("SELECT COUNT(*) FROM sessions WHERE id = ?", (new_sid,)).fetchone()[0]
+    finally:
+        conn.close()
+    print(f"\n  ✅ 新 session 行已写入（验证命中 {n} 行）")
+
+    # 正文文件：文件名换成新 id；jsonl 内部的 sessionId 也要跟着换
+    print("\n📄 复制对话正文...")
+    for f in src_info.files:
+        if not f.exists():
+            continue
+        target = f.parent / f.name.replace(sid, new_sid)
+        if not safe_copy(f, target):
+            raise RuntimeError("复制对话正文失败，已中止（请执行回滚）")
+        if target.is_file() and target.suffix == ".jsonl":
+            _rewrite_session_id(target, sid, new_sid)
+        meta["copied_to"].append(str(target))
+        mark = "目录" if target.is_dir() else "文件"
+        print(f"  ✅ {target.name} [{mark}] ({fmt_size(path_size(target))})")
+
+    src_tasks = ep.tasks_dir / sid
+    if src_tasks.exists():
+        dst_tasks = ep.tasks_dir / new_sid
+        if dst_tasks.exists():
+            shutil.rmtree(str(dst_tasks))
+        shutil.copytree(str(src_tasks), str(dst_tasks))
+        meta["cloned_tasks"] = True
+        print("  ✅ 任务数据已复制")
+
+    (bp / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print("\n" + "=" * 70)
+    print("✅ 同版本复制完成")
+    print("=" * 70)
+    print(f"\n  原标题: {clip(old_title or '(无标题)', 40)}")
+    print(f"  新对话: {clip(new_title or '(无标题)', 40)}")
+    print(f"  新 id:  {new_sid}")
+    print(f"  备份:   {bp}")
+    print(f"  回滚:   python3 scripts/migrate_session.py --rollback {bp.name}")
+    print("\n  现在可以在客户端里看到这条副本（原对话保持不变）。")
 
 
 def _migrate_cross(src_ep, dst_ep, src_row, mode, on_conflict,
@@ -1350,9 +1599,9 @@ def _migrate_cross(src_ep, dst_ep, src_row, mode, on_conflict,
             conn.execute("DELETE FROM sessions WHERE id = ?", (ov_id,))
             for f in find_project_files(dst_ep, ov_id):
                 try:
-                    f.unlink()
-                except Exception:
-                    pass
+                    remove_path(f)  # 同样可能是 tool-results 目录
+                except OSError as e:
+                    print(f"  ⚠️  残留目标旧文件 {f.name} 未能删除：{e}")
             print(f"  ✅ 已删除目标中的旧对话 {ov_id[:8]}…")
             meta["override_deleted"] = True
 
@@ -1383,9 +1632,11 @@ def _migrate_cross(src_ep, dst_ep, src_row, mode, on_conflict,
         if not f.exists():
             continue
         target = dst_dir / f.name
-        shutil.copy2(str(f), str(target))
+        if not safe_copy(f, target):
+            raise RuntimeError("复制对话正文失败，已中止（请先回滚或将源数据手动恢复）")
         copied.append(str(target))
-        print(f"  ✅ {f.name} ({fmt_size(f.stat().st_size)})")
+        mark = "目录" if f.is_dir() else "文件"
+        print(f"  ✅ {f.name} [{mark}] ({fmt_size(path_size(f))})")
     meta["copied_to"] = copied
 
     # 任务数据
@@ -1417,8 +1668,9 @@ def _migrate_cross(src_ep, dst_ep, src_row, mode, on_conflict,
             conn.close()
         for f in src_info.files:
             if f.exists():
-                f.unlink()
-                print(f"  ✅ 已删除源文件 {f.name}")
+                kind = "目录" if f.is_dir() else "文件"  # 需在删除前判断
+                remove_path(f)  # 可能是文件，也可能是 tool-results 目录
+                print(f"  ✅ 已删除源{kind} {f.name}")
         if src_tasks.exists():
             shutil.rmtree(str(src_tasks))
         # 文件删完后源目录可能空了，顺手清理，避免残留空目录
@@ -1532,9 +1784,10 @@ def interactive():
         print(f"\n❌ {src_ep.label} 没有数据：{src_ep.db}")
         sys.exit(1)
     if src_name == dst_name:
-        print("\n⚠️  源版本与目标版本相同，这是同版本内的账号迁移。")
+        print("\n⚠️  源版本与目标版本相同，这是同版本内的迁移。")
         print("   如果是要在账号之间迁移整个账号的数据，请用 scripts/migrate.py")
-        print("   继续将只改变该对话的 user_id。")
+        print("   · 源对话属于别的账号 → 只把该对话的 user_id 改到当前账号")
+        print("   · 源对话已属于当前账号 → 复制出一份新对话（新 id，标题加「（副本）」）")
         if not ask_yes_no("   是否继续？(y/N): "):
             sys.exit(0)
     elif not dst_ep.exists():
@@ -1634,4 +1887,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except RuntimeError as e:
+        # 备份/复制阶段的业务性中止：给出人话提示，不打 traceback
+        print(f"\n❌ {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n已中断")
+        sys.exit(130)

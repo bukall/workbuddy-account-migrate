@@ -76,12 +76,73 @@ def project_files(home, edition, sid):
     return sorted(p.glob(f"*/{sid}*"))
 
 
+def db_row_full(home, edition, sid):
+    """读取整行（含 custom_title）"""
+    db = home / (".workbuddy-ai" if edition == "intl" else ".workbuddy") / "workbuddy.db"
+    c = sqlite3.connect(str(db))
+    r = c.execute(
+        "SELECT id, user_id, title, custom_title FROM sessions WHERE id = ?", (sid,)
+    ).fetchone()
+    c.close()
+    return r
+
+
+def _find_clone_sid(home, edition, base_sid):
+    """找出同版本克隆出来的那条对话（custom_title 带「副本」）"""
+    db = home / (".workbuddy-ai" if edition == "intl" else ".workbuddy") / "workbuddy.db"
+    c = sqlite3.connect(str(db))
+    r = c.execute(
+        "SELECT id FROM sessions WHERE id != ? AND custom_title LIKE '%副本%'", (base_sid,)
+    ).fetchone()
+    c.close()
+    return r[0] if r else None
+
+
+def _jsonl_path(home, edition, sid):
+    p = home / (".workbuddy-ai" if edition == "intl" else ".workbuddy") / "projects"
+    hits = sorted(p.glob(f"*/{sid}.jsonl"))
+    return hits[0] if hits else None
+
+
 def first_session(home, edition):
     db = home / (".workbuddy-ai" if edition == "intl" else ".workbuddy") / "workbuddy.db"
     c = sqlite3.connect(str(db))
     r = c.execute("SELECT id, title FROM sessions ORDER BY last_activity_at DESC LIMIT 1").fetchone()
     c.close()
     return r
+
+
+def pick_test_session(home):
+    """挑一条【国内版有、国际版没有】的最新对话作为测试用例
+
+    fixture 取自真实数据，用户可能已经把某些对话迁到国际版了。若刚好选到两边
+    都存在的对话，后面「无冲突迁移」的用例会全部撞上硬冲突而失败——那是数据
+    状态问题，不是脚本缺陷，所以这里主动避开。
+    """
+    c = sqlite3.connect(str(home / ".workbuddy" / "workbuddy.db"))
+    rows = c.execute(
+        "SELECT id, title FROM sessions ORDER BY last_activity_at DESC"
+    ).fetchall()
+    c.close()
+    d = sqlite3.connect(str(home / ".workbuddy-ai" / "workbuddy.db"))
+    have = {r[0] for r in d.execute("SELECT id FROM sessions")}
+    d.close()
+    for sid, title in rows:
+        if sid not in have:
+            return sid, title
+    if rows:
+        print("  ⚠️  国内版所有对话在国际版都已存在，只能选到会冲突的对话")
+        return rows[0]
+    return None, None
+
+
+def session_with_tool_results(home):
+    """找出一条正文里带 tool-results 目录的对话（没有则返回 None）"""
+    p = home / ".workbuddy" / "projects"
+    for f in sorted(p.glob("*/*")):
+        if f.is_dir():
+            return f.name
+    return None
 
 
 def main():
@@ -92,7 +153,7 @@ def main():
     home = prepare_fixture.build()
     print(f"\nfixture: {home}\n")
 
-    sid, title = first_session(home, "domestic")
+    sid, title = pick_test_session(home)
     print(f"测试用例对话: {sid[:8]}… 《{str(title)[:30]}》\n")
 
     src_before = db_rows(home, "domestic")
@@ -228,6 +289,64 @@ def main():
             check("user_id 已改回原值", row and row[1] == fake_uid, f"got={row[1] if row else None}")
         _set_uid(home, "domestic", sid, real_uid)   # 还原现场
 
+    # ---------- 12. 同版本复制（克隆出新对话） ----------
+    print("\n[12] 同版本复制：克隆出一份新对话")
+    before = db_rows(home, "domestic")
+    r = run(["--from", "domestic", "--to", "domestic", "--session-id", sid,
+             "--mode", "copy", "--yes", "--force"], home)
+    check("同版本复制可执行", r.returncode == 0, r.stderr[-400:])
+    check("不再提示「无需迁移」", "无需迁移" not in r.stdout, r.stdout[-300:])
+    check("对话数 +1", db_rows(home, "domestic") == before + 1,
+          f"{before} → {db_rows(home, 'domestic')}")
+
+    new_sid = _find_clone_sid(home, "domestic", sid)
+    check("克隆出新对话", bool(new_sid), str(new_sid))
+    if new_sid:
+        row = db_row_full(home, "domestic", new_sid)
+        shown = (row[3] or row[2] or "") if row else ""
+        check("副本标题带「副本」标记", "副本" in shown, f"got={shown}")
+
+        cj = _jsonl_path(home, "domestic", new_sid)
+        check("副本正文已生成", cj is not None and cj.exists())
+        if cj and cj.exists():
+            txt = cj.read_text(encoding="utf-8", errors="replace")
+            check("副本正文内 sessionId 已改写", sid not in txt and new_sid in txt,
+                  f"残留旧id={sid in txt} 含新id={new_sid in txt}")
+
+        orig = db_row_full(home, "domestic", sid)
+        oshown = (orig[3] or orig[2] or "") if orig else ""
+        check("原始对话保留", orig is not None)
+        check("原始对话未被加副本标记", orig is not None and "副本" not in oshown, f"got={oshown}")
+
+        tag = _last_backup_tag(home, "domestic")
+        if tag:
+            r = run(["--rollback", tag, "--yes"], home)
+            check("克隆回滚成功", r.returncode == 0, r.stderr[-300:])
+            check("回滚后副本已删除", db_row_full(home, "domestic", new_sid) is None)
+            check("回滚后原始对话仍在", db_row_full(home, "domestic", sid) is not None)
+            check("回滚后对话数还原", db_rows(home, "domestic") == before,
+                  f"got={db_rows(home, 'domestic')}")
+
+    # ---------- 13. 正文含目录（tool-results） ----------
+    print("\n[13] 正文含目录（tool-results）时完整复制")
+    # 用例对话不一定带 tool-results，单独找一条带目录的来测
+    tsid = session_with_tool_results(home)
+    src_dirs = [f for f in project_files(home, "domestic", tsid) if f.is_dir()] if tsid else []
+    if not src_dirs:
+        print("  ⏭️  当前 fixture 没有 tool-results 目录，跳过")
+    else:
+        _remove_from_intl(home, tsid)   # 先清干净，避免硬冲突降级为 skip
+        r = run(["--from", "domestic", "--to", "intl", "--session-id", tsid,
+                 "--mode", "copy", "--yes", "--force"], home)
+        check("含目录的正文可迁移", r.returncode == 0, r.stderr[-400:])
+        dst_dirs = [f for f in project_files(home, "intl", tsid) if f.is_dir()]
+        check("目标侧目录已复制", len(dst_dirs) == len(src_dirs),
+              f"src={len(src_dirs)} dst={len(dst_dirs)}")
+        if dst_dirs:
+            sf = sorted(p.name for p in src_dirs[0].rglob("*") if p.is_file())
+            df = sorted(p.name for p in dst_dirs[0].rglob("*") if p.is_file())
+            check("目录内文件齐全", bool(sf) and sf == df, f"{sf} vs {df}")
+
     # ---------- 汇总 ----------
     print("\n" + "=" * 70)
     print(f"结果: 通过 {len(PASS)} / 失败 {len(FAIL)}")
@@ -278,7 +397,16 @@ def _remove_from_intl(home, sid):
     c.commit()
     c.close()
     for f in project_files(home, "intl", sid):
-        f.unlink()
+        _rm(f)
+
+
+def _rm(p):
+    """删除文件或目录（tool-results 是目录）"""
+    import shutil
+    if p.is_dir():
+        shutil.rmtree(str(p))
+    elif p.exists():
+        p.unlink()
 
 
 def _make_same_title_session(home, sid, title):
@@ -290,7 +418,7 @@ def _make_same_title_session(home, sid, title):
     c.execute("DELETE FROM sessions WHERE id = ?", (sid,))
     c.execute("DELETE FROM session_usage WHERE session_id = ?", (sid,))
     for f in project_files(home, "intl", sid):
-        f.unlink()
+        _rm(f)
 
     cols = [d[0] for d in c.execute("SELECT * FROM sessions LIMIT 1").description]
     row = dict(zip(cols, c.execute("SELECT * FROM sessions LIMIT 1").fetchone()))

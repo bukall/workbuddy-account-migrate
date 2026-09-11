@@ -34,7 +34,12 @@
 │   └── {workspace_path}/         # 按工作空间路径，不按账号 ✅
 │       ├── {session_id}.jsonl            # 对话正文
 │       ├── {session_id}.meta.json        # 元信息
-│       └── {session_id}.file-rollback.ndjson
+│       ├── {session_id}.file-rollback.ndjson
+│       └── {session_id}/                 # ⚠️ 目录！大工具输出外溢处
+│           └── tool-results/*.txt
+│
+│   # 注意：glob("*/{session_id}*") 会同时命中上面的【文件】和这个【目录】，
+│   #      对目录做 shutil.copy2()/unlink() 在 Windows 上会抛 PermissionError / IsADirectoryError
 │
 ├── tasks/                        # 任务列表
 │   └── {session_id}/             # 按 session 归属，新版 UI 不读取 ← 恢复目标
@@ -85,6 +90,7 @@ cat ~/Library/Application\ Support/WorkBuddy/User/globalStorage/storage.json | \
 | connectors/states.json | 子目录 | JSON 深度合并 | 🟢 低 |
 | **tasks** | **按 session** | **TaskCreate 重建 / 文件复制** | **🟡 中（新版 UI 不读文件）** |
 | **projects/*.jsonl** | **按 session（非数据库）** | **跨版本必须复制文件** | **🔴 高（漏了对话就是空的）** |
+| **projects/{sid}/tool-results/** | **按 session（目录）** | **必须整目录复制** | **🔴 高（备份阶段若按文件处理会崩溃）** |
 | skills | 无 | 不需要迁移 | - |
 | automations | 无 | 不需要迁移 | - |
 | settings/mcp/models | 无 | 不需要迁移 | - |

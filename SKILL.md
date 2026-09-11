@@ -363,6 +363,7 @@ for f in glob.glob(os.path.expanduser("~/.workbuddy/tasks/*/*.json")):
 2. `session_usage` 表 1 行（token 统计）
 3. `workspaces` 表登记 cwd（否则客户端找不到路径）
 4. `projects/{slug}/{id}.jsonl` + `.meta.json` + `.file-rollback.ndjson`
+5. `projects/{slug}/{id}/tool-results/*.txt` —— **目录**，大工具输出外溢处（第 5 样容易被忘）
 
 ### 两个版本 sessions 表列一致，但顺序不同
 
@@ -416,12 +417,26 @@ INSERT INTO sessions ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})
 | **无冲突时跳过确认** | `decision` 变量若初始化成 `"overwrite"`，无冲突时会被误判为"已确认覆盖"，直接执行 move 删源 | 初始值设为 `None`，只有真正走过冲突询问才跳过确认 |
 | **rollback 空 uid 灾难** | `backup_path / ""` 会退化成备份目录本身、`CONNECTORS_DIR / ""` 退化成整个 connectors 目录，`rmtree` 会删光所有账号配置 | 回滚前必须校验 `target_uid` 非空，否则跳过 |
 | **非交互模式默认覆盖** | `--yes` 时无法询问，若默认覆盖等于替用户做决定 | 无 TTY 一律降级 skip，需覆盖显式加 `--on-conflict overwrite` |
+| **正文不只是文件，还有目录** | `find_project_files()` 用 `glob("*/{sid}*")` 匹配，会命中与会话同名的 **`tool-results/` 目录**；对它 `shutil.copy2()` 在 Windows 上抛 `PermissionError: [Errno 13]`，备份阶段直接崩 | 文件与目录统一走 `copy_path()` / `remove_path()`；统计大小用递归 `path_size()` |
+| **目录大小被算成 0** | 目录 `stat().st_size` 不含内部文件，`tool-results/` 的贡献被漏掉 | 递归累加 `p.rglob("*")` |
+| **同版本 copy 空转** | `_migrate_intra` 只会改 `user_id`，源对话已属于当前账号时打印「无需迁移」就退出，用户想要的那份复制根本没发生 | uid 相同走克隆分支：新 id + 新标题 + 复制正文/任务 |
+| **克隆后正文仍指向原对话** | 每条消息都内嵌 `"sessionId":"<sid>"`，只改文件名不改正文，副本内部还是旧 id | `_rewrite_session_id()` 逐行流式替换（大文件不能整个读进内存） |
+| **克隆回滚误删原对话** | 通用回滚按 `session_id`（= 原始对话 id）删行，同版本克隆时源目标同库，会把原对话一起删掉 | 备份写 `kind=session_clone` + `new_session_id`，回滚走独立分支只删副本 |
+
+## 同版本迁移的两种语义
+
+`--from` 与 `--to` 相同时自动判断：
+
+| 情况 | 行为 | 备份 kind |
+|:---|:---|:---|
+| 源对话属于**别的账号** | 只 `UPDATE sessions.user_id`（归属转移） | `session_intra` |
+| 源对话**已属于当前账号** | 克隆出新对话（新 id，标题加「（副本）」） | `session_clone` |
 
 ## 测试
 
 ```bash
 python3 tests/prepare_fixture.py    # 在临时目录构造 fixture（只读复制真实数据子集）
-python3 tests/run_tests.py          # 45 项端到端测试
+python3 tests/run_tests.py          # 61 项端到端测试
 ```
 
 **严禁在真实数据目录上跑迁移测试**——fixture 用 `WORKBUDDY_MIGRATE_HOME` 环境变量指向临时目录，脚本内所有路径都从它派生。
