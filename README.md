@@ -1,17 +1,50 @@
 # workbuddy-account-migrate
 
-> WorkBuddy 切换账号后对话记录不见了？一键恢复。
+> WorkBuddy 数据搬家工具：**跨设备迁移**（家用电脑 ⇄ 办公电脑，两个账号也能把项目会话打包带走）+ **账号切换恢复**（切账号后对话记录、记忆、连接器一键找回）。
+>
+> Move your WorkBuddy data: **carry project sessions across computers** (home ⇄ office, two accounts) + **recover everything after switching accounts** (conversations, memory, connectors).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform: macOS | Windows | Linux](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://www.python.org/)
-[![Version 1.6.3](https://img.shields.io/badge/Version-1.6.3-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
+[![Version 1.7.0](https://img.shields.io/badge/Version-1.7.0-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 
 **[English](#english) | [中文](#chinese)**
 
 ---
 
 <h2 id="chinese">中文</h2>
+
+### ⭐ 核心功能
+
+| | 功能 | 解决什么场景 |
+|:--|:---|:---|
+| ⭐ | **跨设备项目迁移**<br>`migrate_project.py`（v1.7 新增） | **家用电脑和办公电脑各一个账号，两地交替做同一个项目**——项目会话打包成单个文件带走，向导模式输序号 + 拖文件，三步完成 |
+| 🔄 | **整账号迁移**<br>`migrate.py` | 切换账号 / 重新登录后，对话记录、长期记忆、MCP 连接器全部"消失"——一键合并恢复可见 |
+| 💬 | **单对话跨版本迁移**<br>`migrate_session.py` | 只想把某一个对话从国内版搬到国际版（或反向），不动其他数据 |
+
+**三个脚本都支持无参数运行进交互向导，全程不需要知道 user_id。**
+
+跨设备迁移三步走（这是本工具的招牌场景）：
+
+```
+电脑A（账号A）                                电脑B（账号B）
+┌─────────────────────┐                  ┌─────────────────────┐
+│ 项目A · 77 个会话    │  ① 导出（选1）   │                     │
+│ 正文/工具结果/任务/  │ ────────────────→│  包出现在桌面        │
+│ 工作区记忆           │  包自动放桌面     │  ③ 导入（选2）       │
+└─────────────────────┘                  │  选包 → 拖入项目路径  │
+        │                                └─────────────────────┘
+        │ ② 传输：AirDrop / U盘 / scp / 网盘           │
+        └─────────────────────────────────────────────→
+                                           自动改写账号 + 项目路径
+                                           会话全部归来 ✅
+```
+
+- 🔁 **同一个包反复导入不出双份**——"两地交替工作"来回带的底气
+- 🧳 工作区记忆（`{项目}/.workbuddy/`）一起带走
+- 💻 macOS ⇄ Windows 路径风格自动重映射（盘符、分隔符、中文路径）
+- 🛡️ 导入前自动备份，`--rollback` 一键还原
 
 ### 你是不是遇到了这个问题？
 
@@ -243,6 +276,62 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <SESSI
 > 大小统计），脚本本身是跨平台的（路径走 pathlib、进程检测 Windows 用 `tasklist`、其他平台用
 > `ps`），但跨版本迁移全流程在 macOS / Linux 未经实测，欢迎提 Issue 反馈。
 
+### 跨设备项目迁移（v1.7.0）
+
+前面两个脚本都作用于**同一台机器**。如果你是「家用电脑 + 办公电脑，两个账号，两地交替做同一个项目」（issue #8），用第三个脚本——**项目打包导出 / 导入**。
+
+**小白路线（推荐）：无参数进向导，全程输序号 + 拖文件**
+
+```bash
+python3 scripts/migrate_project.py
+```
+
+```
+  你现在在哪台电脑上？
+    1. 要离开这台电脑 —— 把项目打包带走（导出）
+    2. 到了新电脑 —— 把迁移包导入进来（导入）
+```
+
+- 选 1：列出这台电脑的所有项目 → 输序号 → 包自动放到**桌面**，拷去 U 盘 / AirDrop 即可
+- 选 2：自动发现**桌面 / 下载**里的迁移包 → 输序号 → 把项目文件夹**拖进窗口**回车 → 确认导入
+- 导入前自动备份，出问题 `--rollback` 一键还原；账号、路径重映射全自动
+
+**高级用法（可跳过）**：
+
+```bash
+python3 scripts/migrate_project.py export --cwd /path/项目A              # 指定项目导出
+python3 scripts/migrate_project.py info 项目A.wbproj                     # 查看包内容
+python3 scripts/migrate_project.py import 项目A.wbproj --cwd /新路径 --dry-run
+python3 scripts/migrate_project.py import 项目A.wbproj --cwd /新路径 --on-conflict overwrite
+python3 scripts/migrate_project.py --backups                             # 查看备份
+python3 scripts/migrate_project.py --rollback <TAG>                      # 回滚一次导入
+```
+
+**设计边界**：工具只做「打包」和「解包」两件纯本地的事。包怎么传（AirDrop / U 盘 / scp / 网盘）、项目在目标机放哪、用哪个账号登录——全部由你决定。导入时自动把 `user_id` 改写为**目标机登录账号**、`cwd` 与正文内嵌路径改写为新路径，无需手动处理。
+
+**包内容**（一个项目的完整会话数据，缺一样客户端就显示异常）：
+
+| 数据 | 说明 |
+|:---|:---|
+| sessions + session_usage 表行 | `user_id` / `cwd` 在导入侧改写 |
+| `projects/{slug}/` 正文 | `.jsonl` + `.meta.json` + `.file-rollback.ndjson` |
+| `tool-results/` 目录 | 大工具输出外溢处，整目录打包 |
+| `todos/` + `tasks/` | 任务数据 |
+| `{项目}/.workbuddy/` 工作区记忆 | 默认包含，`--no-workspace-memory` 排除 |
+| 账号级 memory / connectors | ❌ **不在范围**（跨设备项目迁移不含账号数据合并） |
+
+**冲突语义**（"两地交替"场景的命根子）：
+
+| 冲突 | 行为 |
+|:---|:---|
+| 同 id（重复导入同一个包） | **覆盖**——反复导入不会产生双份对话 |
+| 同标题不同 id | 默认跳过并警告；交互模式询问 |
+| 非交互终端（无 TTY） | 一律降级跳过，需显式 `--on-conflict overwrite` 批量覆盖 |
+
+回滚：导入自动备份，`--backups` 查看、`--rollback <TAG>` 整体还原（数据库快照 + 文件）。工作区记忆合并是追加式文本，不参与回滚。
+
+> ⚠️ **平台说明**：本脚本逻辑复用 v1.6 系列已验证机制（列名对齐、目录/文件统一复制、WAL checkpoint），并附 34 项合成 fixture 测试（两台"虚拟机器"全链路）。但**跨设备全流程尚未在两台真机间实测**，首次使用建议先 `--dry-run`，欢迎提 Issue 反馈。
+
 ### 工作原理
 
 **Step 1：自动诊断** — 从数据库、Memory 文件、Connector 目录三个来源自动发现所有账号。当前登录账号的判定顺序（v1.6.3）：**① `{数据目录}/storage/skeleton/account-snapshot.json` 的 `primary.uid`** → ② `storage.json` 的 `genie.userId` → ③ DB 中 session 数最多的 user_id。三者与 daemon 日志里的面板 uid 会一起打印出来，不一致时明确告警。
@@ -300,6 +389,14 @@ python3 scripts/migrate.py --rollback 20260525170000_abc12345
 
 ### FAQ
 
+**Q: WorkBuddy 两台电脑怎么同步对话记录？家用和办公电脑各一个账号怎么办？**
+
+A: 用**跨设备项目迁移**（v1.7 核心功能）：在电脑A上运行 `python3 scripts/migrate_project.py` 选「打包带走」，把桌面上的 `.wbproj` 包传到电脑B（AirDrop / U盘 / 网盘均可），再运行一次选「导入进来」。账号与项目路径自动重映射；同一个包反复导入不会产生重复对话——两地交替工作就靠这套流程来回带。
+
+**Q: WorkBuddy 换新电脑了，项目的历史会话能带走吗？**
+
+A: 能。会话记录不在代码仓库里，而在本机数据目录（`~/.workbuddy/`）。用 `migrate_project.py export` 把指定项目的全部会话（对话正文、工具结果、任务列表、工作区记忆）打包成一个文件，到新电脑上 `import` 即可，代码本身照旧走 git。
+
 **Q: WorkBuddy 切换账号后对话记录 / 历史记录真的没丢吗？**
 
 A: 没丢。数据文件全部还在磁盘上，只是 UI 按 `user_id` 过滤导致看不到。本工具把这些数据合并到当前账号下即可恢复可见。
@@ -338,10 +435,12 @@ workbuddy-account-migrate/
 ├── SKILL.md                               # WorkBuddy Skill 描述符
 ├── scripts/
 │   ├── migrate.py                         # 整账号迁移（同版本内）
-│   └── migrate_session.py                 # 单对话迁移（支持跨版本，v1.6）
+│   ├── migrate_session.py                 # 单对话迁移（支持跨版本，v1.6）
+│   └── migrate_project.py                 # 跨设备项目导出/导入（v1.7）
 ├── tests/
 │   ├── prepare_fixture.py                 # 构造临时测试 fixture（只读复制真实数据）
-│   └── run_tests.py                       # 端到端测试（86 项，含 migrate.py 单元级用例）
+│   ├── run_tests.py                       # 端到端测试（86 项，含 migrate.py 单元级用例）
+│   └── run_project_tests.py               # 跨设备项目迁移合成测试（34 项，不依赖真实数据）
 └── references/
     └── data_isolation_map.md              # 数据隔离全景图
 ```
@@ -370,6 +469,19 @@ workbuddy-account-migrate/
 | 正文 id 改写范围 | 只改写 `"sessionId":"..."` 字段值。消息正文里引用到的旧 id（日志、路径）保持原样——那是用户可见内容，不应被改 |
 
 ### 更新日志
+
+#### v1.7.0 (2026-10-06)
+
+**新增：`scripts/migrate_project.py` — 跨设备项目导出/导入**（响应 issue #8）
+
+- **场景**：家用电脑（账号A）+ 办公电脑（账号B），两地交替做同一个项目，项目会话数据随人走
+- **小白向导**：无参数运行即进向导（源机选「打包带走」/ 目标机选「导入进来」），全程输序号 + 拖文件；导出包默认放**桌面**，导入自动发现**桌面/下载**里的包；交互导入写入前有确认步骤（小白的 dry-run 替代品）
+- **export**：按 `cwd` 列出项目 → 打包为 `.wbproj`（sessions/usage/正文/tool-results/todos/tasks/工作区记忆 + manifest）。**只读操作**，客户端开着也能跑
+- **import**：探测目标机登录 uid（account-snapshot 权威）→ 指定新路径（强制校验存在）→ 重映射写入（`user_id`/`cwd`/slug 重推导/jsonl 顶层 cwd 字段流式改写）
+- **冲突语义**：同 id 覆盖（反复导入不出双份，"两地交替"靠它）；同标题不同 id 默认跳过；无 TTY 降级跳过，`--on-conflict overwrite` 批量覆盖
+- **回滚**：导入前 sqlite backup API 整库快照 + 覆盖文件 stash，`--rollback` 一键还原（还原前清理残留 `-wal/-shm`，防陈旧 WAL 重放）
+- **测试**：`tests/run_project_tests.py` 34 项合成 fixture 测试——两台"虚拟机器"（不同 uid / 不同路径风格 / 不同表列集合）走 export→传输→import→重复导入→回滚全链路，不依赖真实数据
+- **明确不做**：网络传输、账号级 memory/connectors 合并、自动双向同步（传输交给用户，二期再议）
 
 #### v1.6.3 (2026-09-22)
 
@@ -538,6 +650,18 @@ workbuddy-account-migrate/
 
 <h2 id="english">English</h2>
 
+### ⭐ Core Features
+
+| | Feature | What it solves |
+|:--|:---|:---|
+| ⭐ | **Cross-device project migration**<br>`migrate_project.py` (new in v1.7) | **Home and office computers with different accounts, alternating on the same project** — pack a project's sessions into one file and carry it over; wizard mode, three steps |
+| 🔄 | **Full-account merge**<br>`migrate.py` | After switching accounts / re-logging in, conversations, memory and MCP connectors "disappear" — one command merges them back |
+| 💬 | **Single-session cross-edition migration**<br>`migrate_session.py` | Move one conversation between the domestic and international editions |
+
+**All three scripts open an interactive wizard when run with no arguments — no user_id knowledge required.**
+
+Cross-device highlights: re-importing the same package never duplicates conversations (built for alternating work), workspace memory travels along, macOS ⇄ Windows path remapping, automatic backup with one-command rollback.
+
 ### The Problem
 
 After switching accounts in WorkBuddy (Tencent Cloud AI assistant desktop app), **all your previous conversation history, long-term memory, and MCP connector configs disappear from the UI**. The data is still on disk — just hidden by `user_id` isolation.
@@ -613,7 +737,58 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <ID>
 - Migrates the session row, usage stats, workspace entry **and** the `projects/*.jsonl` transcript — without the transcript the conversation opens empty.
 - Platform note: the full cross-edition flow is only tested on Windows (Win 11 + Python 3.13); on macOS, `--list` has been verified against a real domestic-edition fixture (2026-09-21). The script itself is cross-platform — issue reports welcome.
 
+### Cross-device project migration (v1.7.0)
+
+Both scripts above operate on **one machine**. For the "home PC (account A) + office PC (account B), alternating work on the same project" scenario (issue #8), use the third script — **project export / import**.
+
+**Beginner route (recommended): run it with no arguments for a wizard — pick numbers, drag files**
+
+```bash
+python3 scripts/migrate_project.py
+```
+
+- Choose 1 on the source machine: it lists all projects → pick one → the package lands on your **Desktop**, ready to AirDrop / copy
+- Choose 2 on the target machine: packages on **Desktop / Downloads** are auto-discovered → pick one → drag the project folder into the window → confirm
+- Every import is backed up first (`--rollback` to undo); account and path remapping are fully automatic
+
+**Advanced (optional)**:
+
+```bash
+python3 scripts/migrate_project.py export --cwd /path/ProjectA
+python3 scripts/migrate_project.py info ProjectA.wbproj
+python3 scripts/migrate_project.py import ProjectA.wbproj --cwd /new/path --dry-run
+python3 scripts/migrate_project.py import ProjectA.wbproj --cwd /new/path --on-conflict overwrite
+python3 scripts/migrate_project.py --rollback <TAG>
+```
+
+**Scope**: the tool only packs and unpacks. How you transfer the file (AirDrop / USB / scp), where the project lives on the target machine, which account you log in with — all up to you. On import, `user_id` is rewritten to the **target machine's login account**, `cwd` and in-transcript paths are remapped to the new path automatically.
+
+**Package contents**: session + usage rows, transcripts (`projects/{slug}/`), `tool-results/`, `todos/`, `tasks/`, and the project's `.workbuddy/` workspace memory (opt out with `--no-workspace-memory`). Account-level memory/connectors are **out of scope**.
+
+**Conflict semantics**: same-id conflicts are **overwritten** (re-importing the same package never duplicates conversations); same-title-different-id defaults to skip; non-interactive terminals degrade to skip unless `--on-conflict overwrite` is given. Imports are backed up and reversible via `--rollback <TAG>`.
+
+> The script reuses mechanisms battle-tested in v1.6 (column-name-aligned inserts, file/dir-safe copies, WAL checkpointing) and ships with 34 synthetic fixture tests; the full cross-device flow has not yet been verified between two real machines — run `--dry-run` first and report issues.
+
+### FAQ
+
+**Q: How do I sync WorkBuddy conversations between two computers with different accounts?**
+
+A: Use **cross-device project migration**: on computer A run `python3 scripts/migrate_project.py` and choose "pack & take away"; copy the `.wbproj` file from the Desktop to computer B, run it again and choose "import". Accounts and project paths are remapped automatically, and re-importing the same package never duplicates conversations.
+
 ### Changelog
+
+#### v1.7.0 (2026-10-06)
+
+**New: `scripts/migrate_project.py` — cross-device project export/import** (answers issue #8)
+
+- **Scenario**: home PC (account A) + office PC (account B), alternating work on one project
+- **Beginner wizard**: run with no arguments (source machine: "pack & take away" / target machine: "import"); pick numbers and drag files throughout; exported packages land on the **Desktop**, imports auto-discover packages on **Desktop/Downloads**; interactive imports confirm before writing
+- **export**: lists projects by `cwd`, packs sessions/usage/transcripts/tool-results/todos/tasks/workspace memory into a `.wbproj` archive with a manifest. Read-only — safe while the client runs
+- **import**: detects the target machine's login uid (account-snapshot authoritative), validates the new local path, remaps everything (`user_id`, `cwd`, slug re-derived from the new path, in-transcript top-level `cwd` fields rewritten streaming)
+- **Conflicts**: same id → overwrite (re-import never duplicates; this is what makes alternating use work); same title different id → skip by default; non-TTY degrades to skip, `--on-conflict overwrite` to force
+- **Rollback**: sqlite backup-API snapshot + stashed overwritten files before import; `--rollback` restores the whole thing (stale `-wal/-shm` are cleared first so old WAL frames can't replay over the restore)
+- **Tests**: `tests/run_project_tests.py` — 34 synthetic fixture checks running export → transfer → import → re-import → rollback across two "virtual machines" with different uids, path styles and table schemas; no real data required
+- **Explicitly out of scope**: network transfer, account-level memory/connector merging, automatic two-way sync (a possible later phase)
 
 #### v1.6.3 (2026-09-22)
 

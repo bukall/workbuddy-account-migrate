@@ -1,7 +1,7 @@
 ---
 name: 账号迁移工具
-description: WorkBuddy 账号切换后一键同步数据，将旧账号的 Session 历史、Memory 记忆、Connector 配置迁移到当前账号。触发关键词：切账号、迁移、同步数据、账号切换、数据丢失、记录没了。
-version: 1.6.2
+description: WorkBuddy 账号切换后一键同步数据，将旧账号的 Session 历史、Memory 记忆、Connector 配置迁移到当前账号。触发关键词：切账号、迁移、同步数据、账号切换、数据丢失、记录没了、跨设备、导出、导入。
+version: 1.7.0
 agent_created: true
 ---
 
@@ -9,12 +9,13 @@ agent_created: true
 
 WorkBuddy 切换账号后，数据通过 `user_id` 隔离，旧账号的 Session、Memory、Connectors 在新账号下不可见。本 Skill 实现一键迁移，将所有历史数据合并到当前登录账号。
 
-## 两个脚本，别用错
+## 三个脚本，别用错
 
 | 场景 | 用哪个 |
 |:---|:---|
 | 切账号后，把**整个账号**的数据合并过来（同一版本内） | `scripts/migrate.py` |
 | 只想把**一个对话**从国内版搬到国际版（或反向） | `scripts/migrate_session.py` |
+| **跨设备**：电脑A项目A账号A → 电脑B项目A账号B（issue #8） | `scripts/migrate_project.py` |
 
 ## 快速使用
 
@@ -65,6 +66,27 @@ python3 scripts/migrate_session.py --rollback <TAG>
 ```
 
 **国内版 vs 国际版**：唯一区别是数据目录不同——国内版使用 `~/.workbuddy/`，国际版使用 `~/.workbuddy-ai/`。目录优先级：`--dir` > `--intl` > 自动探测（`~/.workbuddy-ai` 存在且非空判为国际版）。交互式向导会提示选择版本，默认取自动探测结果。
+
+## 跨设备项目迁移（v1.7，issue #8）
+
+场景：家用电脑（账号A）+ 办公电脑（账号B），两地交替做同一个项目。工具只做「打包 / 解包」两件本地事，传输、路径、账号全由用户决定。
+
+**小白路线（推荐）**：无参数运行进向导，全程输序号 + 拖文件，不打任何 flag——源机选「1 打包带走」（包默认放桌面），目标机选「2 导入进来」（自动发现桌面/下载的包，项目文件夹拖进窗口回车）。flag 都是高级用法。
+
+```bash
+python3 scripts/migrate_project.py                  # 向导（推荐）
+python3 scripts/migrate_project.py export            # 源机：只读打包，客户端开着也能跑，包默认放桌面
+python3 scripts/migrate_project.py info x.wbproj     # 看包
+python3 scripts/migrate_project.py import x.wbproj --cwd /新路径 --dry-run   # 目标机：先关客户端
+python3 scripts/migrate_project.py --rollback <TAG>  # 导入回滚（整库快照 + 文件还原）
+```
+
+**关键机制**：
+- import 自动探测目标机登录 uid（account-snapshot 权威），`user_id` / `cwd` / `workspaces.path` / `projects/{slug}/` 目录名 / **jsonl 每条消息顶层 `cwd` 字段** 全部重映射到目标机
+- slug 一律按**目标机新路径**重推导，不得沿用源 slug（沿用 = 客户端按 `projects/<slug>/<sid>.jsonl` 找不到，"迁移成功却打不开"）
+- 冲突语义：**同 id 覆盖**（同一个包反复导入不出双份——"两地交替"靠这个撑住）；同标题不同 id 默认跳过；无 TTY 降级跳过，`--on-conflict overwrite` 显式批量覆盖
+- 包内容：sessions/usage 行 + 正文 + tool-results + todos/tasks + `{项目}/.workbuddy/` 工作区记忆（可选）。**账号级 memory/connectors 不在范围**
+- 测试：`python3 tests/run_project_tests.py`（34 项合成 fixture，两台"虚拟机器"全链路，不依赖真实数据）
 
 ## 问题背景
 
@@ -533,6 +555,11 @@ INSERT INTO sessions ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})
 | 跨库插入裸抛 sqlite 异常 | 顶层只捕获 `RuntimeError` | 增加 `sqlite3.Error` 分支给出回滚指引 |
 | 进程检测失败被当成"没在跑" | `except: pass` 吞掉异常 | `find_running_clients()` 返回 `(found, trustworthy)`，不可信时要求 `--force` |
 | 正文 id 改写误伤用户文本 | 整行 `replace(old_sid, new_sid)` | 只替换 `"sessionId":"<old>"` 字段值（实测正文里 2/3 的出现是消息文本） |
+| **workspaces 表没有 UNIQUE 约束** | `INSERT OR IGNORE` 拦不住重复导入，同一 path 会插两行 | 先 `DELETE FROM workspaces WHERE path = ?` 再 INSERT（2026-10-06 测试实测） |
+| **jsonl 每条消息顶层带 cwd 字段** | 跨设备不改写 → 客户端继续对话仍指向源机路径 | 流式改写顶层 `"cwd"` 字段值（json 解码转义后比对，兼容 `\uXXXX`）；消息文本里出现的路径一律不动 |
+| **回滚还原 DB 前不清 WAL** | 陈旧 `-wal/-shm` 会在新连接上重放，把刚还原的快照又盖回导入后状态 | 还原前先删 `workbuddy.db-wal` / `-shm` 再做 sqlite backup API 还原 |
+| **部分会话没有 .meta.json** | 按必有文件处理会在打包/导入时空指针 | meta / file-rollback 一律按可选文件收集（实测最新会话无 meta） |
+| **schema 漂移是现实** | 同一账号的库，本机 43 列、另一版本 30 列 | 按列名对齐插入是刚需不是优化；包内保留原始行，导入侧取交集 |
 
 ## 测试
 

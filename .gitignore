@@ -1,6 +1,9 @@
 # 备份目录
 migrate_backups/
 
+# 迁移包（内含用户对话数据，绝不入库）
+*.wbproj
+
 # 系统文件
 .DS_Store
 Thumbs.db
